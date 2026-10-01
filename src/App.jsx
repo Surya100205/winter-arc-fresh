@@ -1,8 +1,8 @@
 import React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import "./styles.css";
-
+import { supabase } from "./supabase.js";
 
 
 const DEFAULT_DATA = {
@@ -64,8 +64,6 @@ const GOALS = {
 };
 
 
-
-const STORAGE_PREFIX = "winter-arc-";
 
 
 
@@ -171,88 +169,59 @@ function getDayStatus(data) {
 
 
 
-function getStoredDay(key) {
 
-  try {
-
-    const saved = localStorage.getItem(
-
-      `${STORAGE_PREFIX}${key}`
-
-    );
-
-
-
-    return saved
-
-      ? { ...DEFAULT_DATA, ...JSON.parse(saved) }
-
-      : null;
-
-  } catch {
-
-    return null;
-
-  }
-
+function toDbRow(data, userId, dateKey) {
+  return {
+    user_id: userId,
+    log_date: dateKey,
+    water: Number(data.water) || 0,
+    protein: Number(data.protein) || 0,
+    steps: Number(data.steps) || 0,
+    workout: Boolean(data.gym),
+    workout_minutes: Number(data.gymMinutes) || 0,
+    run: Boolean(data.run),
+    run_km: Number(data.runMinutes) || 0,
+    sleep: Number(data.sleep) || 0,
+    no_junk: Boolean(data.noJunk),
+    no_sugar: Boolean(data.noSugar),
+    no_phone_eating: Boolean(data.noPhoneEating),
+    hair_care: Boolean(data.hairCare),
+    hair_growth_check_in: Boolean(data.hairGrowthCheckIn),
+    hair_photo: Boolean(data.hairPhoto),
+    coding_minutes: Number(data.codingMinutes) || 0,
+    job_applications: Number(data.jobApplications) || 0,
+    focus_self: Boolean(data.jobFocus),
+    weight:
+      data.weight !== "" && data.weight != null
+        ? Number(data.weight)
+        : null,
+  };
 }
 
-
-
-function getAllStoredDays() {
-
-  const days = {};
-
-
-
-  for (let i = 0; i < localStorage.length; i++) {
-
-    const key = localStorage.key(i);
-
-
-
-    if (
-
-      key &&
-
-      key.startsWith(STORAGE_PREFIX)
-
-    ) {
-
-      const dateKey = key.replace(
-
-        STORAGE_PREFIX,
-
-        ""
-
-      );
-
-
-
-      if (/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
-
-        const data = getStoredDay(dateKey);
-
-
-
-        if (data) {
-
-          days[dateKey] = data;
-
-        }
-
-      }
-
-    }
-
-  }
-
-
-
-  return days;
-
+function fromDbRow(row) {
+  if (!row) return null;
+  return {
+    ...DEFAULT_DATA,
+    water: row.water || 0,
+    protein: row.protein || 0,
+    steps: row.steps || 0,
+    gym: row.workout || false,
+    gymMinutes: row.workout_minutes || 0,
+    run: row.run || false,
+    runMinutes: row.run_km || 0,
+    sleep: row.sleep || 0,
+    noJunk: row.no_junk || false,
+    noSugar: row.no_sugar || false,
+    noPhoneEating: row.no_phone_eating || false,
+    hairCare: row.hair_care || false,
+    hairGrowthCheckIn: row.hair_growth_check_in || false,
+    hairPhoto: row.hair_photo || false,
+    codingMinutes: row.coding_minutes || 0,
+    jobApplications: row.job_applications || 0,
+    jobFocus: row.focus_self || false,
+    weight: row.weight != null ? String(row.weight) : "",
+  };
 }
-
 
 
 function getMonthDays(year, month) {
@@ -429,218 +398,145 @@ function App() {
 
   const today = getLocalDateKey();
 
+  // ── Auth ──────────────────────────────────────────────
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(false);
 
-
+  // ── App state ─────────────────────────────────────────
   const [page, setPage] = useState("dashboard");
-
-
-
-  const [data, setData] = useState(() => {
-
-    const saved = getStoredDay(today);
-
-
-
-    return saved
-
-      ? { ...DEFAULT_DATA, ...saved }
-
-      : { ...DEFAULT_DATA };
-
+  const [data, setData] = useState({ ...DEFAULT_DATA });
+  const [showStepsAnimation, setShowStepsAnimation] = useState(false);
+  const [allDays, setAllDays] = useState({});
+  const [analyticsDate, setAnalyticsDate] = useState(() => {
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() };
   });
+  const [selectedDate, setSelectedDate] = useState(today);
+  const saveTimerRef = useRef(null);
 
-
-
-  const [showStepsAnimation, setShowStepsAnimation] =
-
-    useState(false);
-
-
-
-  const [allDays, setAllDays] = useState(() =>
-
-    getAllStoredDays()
-
-  );
-
-
-
-  const [analyticsDate, setAnalyticsDate] =
-
-    useState(() => {
-
-      const now = new Date();
-
-
-
-      return {
-
-        year: now.getFullYear(),
-
-        month: now.getMonth(),
-
-      };
-
+  // ── Auth listener ─────────────────────────────────────
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
     });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => { setUser(session?.user ?? null); }
+    );
+    return () => subscription.unsubscribe();
+  }, []);
 
+  // ── Load today's data ─────────────────────────────────
+  useEffect(() => {
+    if (!user) { setData({ ...DEFAULT_DATA }); return; }
+    setDataLoading(true);
+    supabase
+      .from("daily_logs")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("log_date", today)
+      .maybeSingle()
+      .then(({ data: row }) => {
+        setData(row ? fromDbRow(row) : { ...DEFAULT_DATA });
+        setDataLoading(false);
+      });
+  }, [user, today]);
 
-
-  const [selectedDate, setSelectedDate] =
-
-    useState(today);
-
-
-
-  const score = useMemo(
-
-    () => getScore(data),
-
-    [data]
-
-  );
-
-
-
-  const completedGoals = useMemo(
-
-    () =>
-
-      TRACKER_CHECKS.filter((check) =>
-
-        check(data)
-
-      ).length,
-
-    [data]
-
-  );
-
-
-
-  const perfectDay = score === 100;
-
-
+  // ── Load all days ────────────────────────────────────
+  const loadAllDays = useCallback(async () => {
+    if (!user) return;
+    const { data: rows } = await supabase
+      .from("daily_logs")
+      .select("*")
+      .eq("user_id", user.id);
+    if (!rows) return;
+    const days = {};
+    rows.forEach((row) => { days[row.log_date] = fromDbRow(row); });
+    setAllDays(days);
+  }, [user]);
 
   useEffect(() => {
+    if (user) loadAllDays();
+  }, [user, loadAllDays]);
 
-    localStorage.setItem(
+  // ── Debounced save ────────────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      await supabase
+        .from("daily_logs")
+        .upsert(toDbRow(data, user.id, today), { onConflict: "user_id,log_date" });
+      loadAllDays();
+    }, 800);
+    return () => clearTimeout(saveTimerRef.current);
+  }, [data, user, today, loadAllDays]);
 
-      `${STORAGE_PREFIX}${today}`,
+  // ── Derived ───────────────────────────────────────────
+  const score = useMemo(() => getScore(data), [data]);
+  const completedGoals = useMemo(
+    () => TRACKER_CHECKS.filter((check) => check(data)).length,
+    [data]
+  );
+  const perfectDay = score === 100;
 
-      JSON.stringify(data)
-
-    );
-
-
-
-    setAllDays(getAllStoredDays());
-
-  }, [data, today]);
-
-
-
+  // ── Handlers ──────────────────────────────────────────
   function update(field, value) {
-
-    setData((previous) => ({
-
-      ...previous,
-
-      [field]: value,
-
-    }));
-
+    setData((previous) => ({ ...previous, [field]: value }));
   }
-
-
 
   function updateNumber(field, value) {
-
-    update(
-
-      field,
-
-      value === "" ? 0 : Number(value)
-
-    );
-
+    update(field, value === "" ? 0 : Number(value));
   }
-
-
 
   function updateSteps(value) {
-
-    const number =
-
-      value === "" ? 0 : Number(value);
-
-
-
+    const number = value === "" ? 0 : Number(value);
     update("steps", number);
-
-
-
-    if (
-
-      number >= GOALS.steps &&
-
-      Number(data.steps) < GOALS.steps
-
-    ) {
-
+    if (number >= GOALS.steps && Number(data.steps) < GOALS.steps) {
       setShowStepsAnimation(true);
-
-
-
-      setTimeout(() => {
-
-        setShowStepsAnimation(false);
-
-      }, 3000);
-
+      setTimeout(() => setShowStepsAnimation(false), 3000);
     }
-
   }
-
-
 
   function resetToday() {
-
-    if (
-
-      window.confirm(
-
-        "Reset today's Winter Arc data?"
-
-      )
-
-    ) {
-
-      setData({
-
-        ...DEFAULT_DATA,
-
-      });
-
+    if (window.confirm("Reset today's Winter Arc data?")) {
+      setData({ ...DEFAULT_DATA });
     }
-
   }
-
-
 
   function goToAnalytics() {
-
-    setAllDays(getAllStoredDays());
-
+    loadAllDays();
     setPage("analytics");
-
   }
 
-
-
   function goToDashboard() {
-
     setPage("dashboard");
+  }
 
+  async function signOut() {
+    await supabase.auth.signOut();
+  }
+
+  // ── Guards ────────────────────────────────────────────
+  if (authLoading) {
+    return (
+      <div className="loading-screen">
+        <div className="loading-ring" />
+        <p>Loading Winter Arc…</p>
+      </div>
+    );
+  }
+
+  if (!user) return <AuthScreen />;
+
+  if (dataLoading) {
+    return (
+      <div className="loading-screen">
+        <div className="loading-ring" />
+        <p>Syncing your data…</p>
+      </div>
+    );
   }
 
 
@@ -804,6 +700,14 @@ function App() {
             </button>
 
           )}
+
+          <button
+            className="secondary-button sign-out-btn"
+            onClick={signOut}
+            title={`Signed in as ${user?.email}`}
+          >
+            Sign Out
+          </button>
 
         </div>
 
@@ -4425,5 +4329,98 @@ function ToggleCard({
 }
 
 
+
+
+
+function AuthScreen() {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    setMessage("");
+    setLoading(true);
+    if (mode === "login") {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) setError(error.message);
+    } else {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) setError(error.message);
+      else setMessage("✓ Check your email for a confirmation link, then sign in.");
+    }
+    setLoading(false);
+  }
+
+  function switchMode() {
+    setMode(mode === "login" ? "signup" : "login");
+    setError("");
+    setMessage("");
+  }
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <p className="eyebrow">WINTER ARC • 90 DAY CHALLENGE</p>
+        <h1 className="auth-title">
+          {mode === "login" ? "Welcome Back" : "Start Your Arc"}
+        </h1>
+        <p className="auth-subtitle">
+          {mode === "login"
+            ? "Sign in to continue your journey."
+            : "Create your account to begin the 90-day challenge."}
+        </p>
+
+        <form className="auth-form" onSubmit={handleSubmit}>
+          <div className="auth-field">
+            <label>Email</label>
+            <input
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoComplete="email"
+            />
+          </div>
+          <div className="auth-field">
+            <label>Password</label>
+            <input
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={6}
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+            />
+          </div>
+
+          {error && <p className="auth-error">{error}</p>}
+          {message && <p className="auth-message">{message}</p>}
+
+          <button className="auth-submit" type="submit" disabled={loading}>
+            {loading
+              ? "Please wait…"
+              : mode === "login"
+              ? "Sign In →"
+              : "Create Account →"}
+          </button>
+        </form>
+
+        <p className="auth-toggle">
+          {mode === "login" ? "New here? " : "Already have an account? "}
+          <button type="button" onClick={switchMode}>
+            {mode === "login" ? "Create account" : "Sign in instead"}
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+}
 
 export default App;

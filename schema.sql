@@ -38,6 +38,8 @@ create table if not exists public.daily_logs (
   no_sugar boolean default false,
   no_phone_eating boolean default false,
   hair_care boolean default false,
+  hair_growth_check_in boolean default false,
+  hair_photo boolean default false,
   focus_self boolean default false,
   note text,
   daily_score integer default 0,
